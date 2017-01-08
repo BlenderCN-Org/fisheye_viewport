@@ -16,7 +16,7 @@
 #
 #======================= END GPL LICENSE BLOCK ========================
 
-# <pep8 compliant>
+# in the future ... <pep8 compliant>
 bl_info = {
     "name": "Fisheye Viewport",
     "author": "Dalai Felinto",
@@ -31,6 +31,102 @@ bl_info = {
 
 import bpy
 from bgl import *
+
+
+# ############################################################
+# GLSL Shaders
+# ############################################################
+
+fragment_shader ="""
+#version 120
+
+uniform sampler2D color_buffer;
+
+void main(void)
+{
+    vec2 coords = gl_TexCoord[0].st;
+    vec4 color = texture2D(color_buffer, coords);
+    gl_FragColor = mix(color, vec4(1.0f, 0.0f, 0.0f, 1.0f), 0.5f);
+}
+"""
+
+
+# ############################################################
+# GLSL Debug
+# ############################################################
+
+def print_shader_errors(shader):
+    """"""
+    log = Buffer(GL_BYTE, len(fragment_shader))
+    length = Buffer(GL_INT, 1)
+
+    print('Shader Code:')
+    glGetShaderSource(shader, len(log), length, log)
+
+    line = 1
+    msg = "  1 "
+
+    for i in range(length[0]):
+        if chr(log[i-1]) == '\n':
+            line += 1
+            msg += "%3d %s" %(line, chr(log[i]))
+        else:
+            msg += chr(log[i])
+
+    print(msg)
+
+    glGetShaderInfoLog(shader, len(log), length, log)
+    print("Error in GLSL Shader:\n")
+    msg = ""
+    for i in range(length[0]):
+        msg += chr(log[i])
+
+    print(msg)
+
+
+def print_program_errors(program):
+    """"""
+    log = Buffer(GL_BYTE, 1024)
+    length = Buffer(GL_INT, 1)
+
+    glGetProgramInfoLog(program, len(log), length, log)
+
+    print("Error in GLSL Program:\n")
+
+    msg = ""
+    for i in range(length[0]):
+        msg += chr(log[i])
+
+    print (msg)
+
+
+# ############################################################
+# Utils
+# ############################################################
+
+def create_shader(source, program=None, type=GL_FRAGMENT_SHADER):
+    """"""
+    if program == None:
+        program = glCreateProgram()
+
+    shader = glCreateShader(type)
+    glShaderSource(shader, source)
+    glCompileShader(shader)
+
+    success = Buffer(GL_INT, 1)
+    glGetShaderiv(shader, GL_COMPILE_STATUS, success)
+
+    if not success[0]:
+        print_shader_errors(shader)
+    glAttachShader(program, shader)
+    glLinkProgram(program)
+
+    return program
+
+
+# ############################################################
+# Operators
+# ############################################################
 
 class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
     """"""
@@ -95,6 +191,7 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
         try:
             self._offscreen = gpu.offscreen.new(512, int(512 / aspect_ratio), 0)
             self._texture = self._offscreen.color_texture
+            self._program = create_shader(fragment_shader)
 
         except Exception as E:
             print(E)
@@ -110,7 +207,7 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
         aspect_ratio = scene.render.resolution_x / scene.render.resolution_y
 
         self._update_offscreen(context, self._offscreen)
-        self._opengl_draw(context, self._texture, aspect_ratio, 0.2)
+        self._opengl_draw(self._program, self._texture, aspect_ratio, 0.2)
 
     def _update_offscreen(self, context, offscreen):
         scene = context.scene
@@ -132,7 +229,8 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
                 projection_matrix,
                 modelview_matrix)
 
-    def _opengl_draw(self, context, texture, aspect_ratio, scale):
+    @staticmethod
+    def _opengl_draw(program, texture, aspect_ratio, scale):
         """
         OpenGL code to draw a rectangle in the viewport
         """
@@ -163,10 +261,17 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
         glScissor(viewport[0], viewport[1], width, height)
 
         # draw routine
+        glUseProgram(program)
+
+        # uniforms
+        uniform = glGetUniformLocation(program, "color_buffer")
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, texture)
+        if uniform != -1: glUniform1i(uniform, 0)
+
+        # draw rectangle
         glEnable(GL_TEXTURE_2D)
         glActiveTexture(GL_TEXTURE0)
-
-        glBindTexture(GL_TEXTURE_2D, texture)
 
         texco = [(1, 1), (0, 1), (0, 0), (1,0)]
         verco = [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)]
@@ -185,6 +290,8 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
         glBindTexture(GL_TEXTURE_2D, act_tex[0])
 
         glDisable(GL_TEXTURE_2D)
+
+        glUseProgram(0)
 
         # reset view
         glMatrixMode(GL_PROJECTION)
