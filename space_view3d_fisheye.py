@@ -45,39 +45,50 @@ uniform float lens;
 uniform float fov;
 uniform float sensor_width;
 uniform float sensor_height;
+uniform float lens_horizontal;
+uniform float lens_vertical;
 
 void uv_to_polar(in vec2 coords, out float phi, out float theta)
 {
-    float u = (coords.s - 0.5f) * sensor_width;
-    float v = (coords.t - 0.5f) * sensor_height;
+    float u = (coords.s - 0.5) * sensor_width;
+    float v = (coords.t - 0.5) * sensor_height;
 
-    float rmax = 2.0f * lens * sin(fov * 0.25f);
+    float rmax = 2.0 * lens * sin(fov * 0.25);
     float r = sqrt(u*u + v*v);
 
-    if(r > rmax) {
+    if (r > rmax) {
         return;
     }
 
-    phi = acos((r != 0.0f)? u/r: 0.0f);
-    theta = 2.0f * asin(r/(2.0f * lens));
+    phi = acos((r != 0.0) ? u / r: 0.0);
+    theta = 2.0 * asin(r / (2.f * lens));
 
-    if (v < 0.0f) {
+    if (v < 0.0) {
         phi = -phi;
     }
+}
+
+vec2 polar_to_linear(in float phi, in float theta)
+{
+    float u = -cos(phi) * sin(theta) / lens_horizontal;
+    float v = sin(phi) * sin(theta) / lens_vertical;
+
+    u = 1.0f - (u + 0.5);
+    v += 0.5;
+
+    return vec2(u, v);
 }
 
 void main(void)
 {
     vec2 coords = gl_TexCoord[0].st;
 
-    vec4 color = texture2D(color_buffer, coords);
-    gl_FragColor = mix(color, vec4(1.0f, 0.0f, 0.0f, 1.0f), 0.5f);
-
     float phi, theta;
     uv_to_polar(coords, phi, theta);
 
-    gl_FragColor.r = phi;
-    gl_FragColor.gb = vec2(theta, theta);
+    vec2 uv = polar_to_linear(phi, theta);
+
+    gl_FragColor = texture2D(color_buffer, uv);
 }
 """
 
@@ -180,13 +191,13 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
         bpy.app.handlers.scene_update_post.append(self._scene_update_post)
 
     @staticmethod
-    def handle_remove():
+    def handle_remove(self):
         if VIEW3D_OT_FisheyeDraw._handle_draw is not None:
             bpy.types.SpaceView3D.draw_handler_remove(VIEW3D_OT_FisheyeDraw._handle_draw, 'WINDOW')
 
         VIEW3D_OT_FisheyeDraw._handle_draw = None
 
-        bpy.app.handlers.scene_update_post.remove(VIEW3D_OT_FisheyeDraw._scene_update_post)
+        bpy.app.handlers.scene_update_post.remove(self._scene_update_post)
 
     def _scene_update_post(self, scene):
         camera = scene.camera
@@ -208,7 +219,7 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
 
     def invoke(self, context, event):
         if VIEW3D_OT_FisheyeDraw.is_enabled:
-            VIEW3D_OT_FisheyeDraw.handle_remove()
+            VIEW3D_OT_FisheyeDraw.handle_remove(self)
             VIEW3D_OT_FisheyeDraw.is_enabled = False
 
             if context.area:
@@ -300,8 +311,14 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
             self._sensor_width = sensor_size * fit_xratio / fit_yratio
             self._sensor_height = sensor_size
 
-        print(self._lens, self._fov, self._sensor_width, self._sensor_height)
+        # calculate the required buffer size based on lens
+        self._update_buffers()
         return True
+
+    def _update_buffers(self):
+        self._angle_horizontal = 2.0 # TODO
+        self._angle_vertical = 1.0 # TODO
+        pass
 
     def camera_fallback(self):
         import math
@@ -316,7 +333,8 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
 
         self._update_offscreen(context, self._offscreen)
         self._opengl_draw(self._program, self._texture, aspect_ratio, 0.5,
-                self._lens, self._fov, self._sensor_width, self._sensor_height)
+                self._lens, self._fov, self._sensor_width, self._sensor_height,
+                self._angle_horizontal, self._angle_vertical)
 
     def _update_offscreen(self, context, offscreen):
         scene = context.scene
@@ -324,12 +342,7 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
         camera = scene.camera
 
         modelview_matrix = camera.matrix_world.inverted()
-        projection_matrix = camera.calc_matrix_camera(
-                render.resolution_x,
-                render.resolution_y,
-                render.pixel_aspect_x,
-                render.pixel_aspect_y,
-                )
+        projection_matrix = self._calc_projection_matrix(scene)
 
         offscreen.draw_view3d(
                 scene,
@@ -338,9 +351,20 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
                 projection_matrix,
                 modelview_matrix)
 
+    def _calc_projection_matrix(self, scene):
+        # TODO calculate it properly
+        render = scene.render
+        return self._camera.calc_matrix_camera(
+                render.resolution_x,
+                render.resolution_y,
+                render.pixel_aspect_x,
+                render.pixel_aspect_y,
+                )
+
     @staticmethod
     def _opengl_draw(program, texture, aspect_ratio, scale,
-            lens, fov, sensor_width, sensor_height):
+            lens, fov, sensor_width, sensor_height,
+            angle_horizontal, angle_vertical):
         """
         OpenGL code to draw a rectangle in the viewport
         """
@@ -390,6 +414,12 @@ class VIEW3D_OT_FisheyeDraw(bpy.types.Operator):
 
         uniform = glGetUniformLocation(program, "sensor_height")
         if uniform != -1: glUniform1f(uniform, sensor_height)
+
+        uniform = glGetUniformLocation(program, "lens_horizontal")
+        if uniform != -1: glUniform1f(uniform, angle_horizontal)
+
+        uniform = glGetUniformLocation(program, "lens_vertical")
+        if uniform != -1: glUniform1f(uniform, angle_vertical)
 
         # draw rectangle
         glEnable(GL_TEXTURE_2D)
